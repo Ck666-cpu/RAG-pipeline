@@ -1,13 +1,28 @@
+import sys
 import model_db
 from llama_index.llms.ollama import Ollama
-from llama_index.core import Settings, get_response_synthesizer
+from llama_index.core import Settings, get_response_synthesizer, PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank
-from llama_index.core import PromptTemplate
 
 # --- CONFIGURATION ---
 COLLECTION_NAME = "crag_llamaindex"
 
+# 1. SETUP LLM
+try:
+    llm = Ollama(
+        model="phi3",
+        request_timeout=360.0,
+        context_window=2048,
+        additional_kwargs={"num_ctx": 2048}
+    )
+    Settings.llm = llm
+except Exception as e:
+    print(f"❌ Error initializing Ollama: {e}")
+    print("   -> Is Ollama running? (ollama serve)")
+    sys.exit(1)  # Stop program if LLM is dead
+
+# 2. SETUP PROMPT
 qa_prompt_tmpl_str = (
     "Context information is below.\n"
     "---------------------\n"
@@ -20,118 +35,178 @@ qa_prompt_tmpl_str = (
 )
 qa_prompt_tmpl = PromptTemplate(qa_prompt_tmpl_str)
 
-# 1. SETUP LLM
-llm = Ollama(
-    model="phi3",
-    request_timeout=360.0,
-    context_window=2048,
-    additional_kwargs={"num_ctx": 2048}
-)
-Settings.llm = llm
+# 3. SETUP RERANKER
+print("Initializing AI Models...")
+try:
+    reranker = SentenceTransformerRerank(
+        model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        top_n=1
+    )
+except Exception as e:
+    print(f"❌ Error downloading Reranker model: {e}")
+    print("   -> Check your internet connection.")
+    sys.exit(1)
 
-# 2. SETUP RERANKER
-reranker = SentenceTransformerRerank(
-    model="cross-encoder/ms-marco-MiniLM-L-6-v2",
-    top_n=1
-)
-
-# 3. SETUP DATABASE
+# 4. SETUP DATABASE
+index = None
 try:
     index = model_db.get_index(COLLECTION_NAME)
-except:
-    print("Index not found. Please upload a document first.")
-    index = None
+except Exception as e:
+    print(f"⚠️ Initial Database Connection Failed: {e}")
 
 
-# --- NEW FUNCTION: INPUT RECEIVER ---
+# --- INPUT RECEIVER ---
 def receive_user_query():
-    """
-    This function simulates the 'Frontend'.
-    It waits for the user to type a question.
-    """
     print("\n" + "-" * 30)
-    query = input("❓ Enter your query: ").strip()
-    return query
+    return input("❓ Enter your query: ").strip()
 
 
-# --- CRAG LOGIC (Now returns the answer) ---
+# --- CRAG LOGIC ---
 def run_crag(user_query):
+    # Validation: Check if index exists
     if not index:
-        return "System Error: Please upload a document first."
+        return "System Error: Database index is not loaded. Please upload a document."
 
     print(f"⚙️ Processing: '{user_query}'")
 
-    # 1. RETRIEVE
-    retriever = VectorIndexRetriever(index=index, similarity_top_k=10)
-    retrieved_nodes = retriever.retrieve(user_query)
+    try:
+        # 1. RETRIEVE
+        retriever = VectorIndexRetriever(index=index, similarity_top_k=10)
+        retrieved_nodes = retriever.retrieve(user_query)
 
-    if not retrieved_nodes:
-        print("🔴 CRAG: No documents found.")
-        return fallback_to_general_knowledge(user_query)
+        if not retrieved_nodes:
+            return fallback_to_general_knowledge(user_query)
 
-    # 2. RERANK
-    reranked_nodes = reranker.postprocess_nodes(retrieved_nodes, query_str=user_query)
+        # 2. RERANK
+        reranked_nodes = reranker.postprocess_nodes(retrieved_nodes, query_str=user_query)
 
-    if not reranked_nodes:
-        return fallback_to_general_knowledge(user_query)
+        if not reranked_nodes:
+            return fallback_to_general_knowledge(user_query)
 
-    # 3. EVALUATE
-    best_score = reranked_nodes[0].score
-    print(f"   -> Relevance Score: {best_score:.4f}")
+        # 3. EVALUATE
+        best_score = reranked_nodes[0].score
+        print(f"   -> Relevance Score: {best_score:.4f}")
 
-    if best_score < 0.5:
-        print("🔴 CRAG DECISION: Database Irrelevant.")
-        return fallback_to_general_knowledge(user_query)
+        if best_score < 0.2:
+            print("🔴 CRAG DECISION: Database Irrelevant.")
+            return fallback_to_general_knowledge(user_query)
 
-    # 4. GENERATE
-    print("🟢 CRAG DECISION: Database Good.")
-    synthesizer = get_response_synthesizer(response_mode="tree_summarize", text_qa_template=qa_prompt_tmpl)
-    response = synthesizer.synthesize(user_query, nodes=reranked_nodes)
+        # 4. GENERATE
+        print("🟢 CRAG DECISION: Database Good.")
+        synthesizer = get_response_synthesizer(
+            response_mode="tree_summarize",
+            text_qa_template=qa_prompt_tmpl
+        )
+        response = synthesizer.synthesize(user_query, nodes=reranked_nodes)
+        return str(response)
 
-    # RETURN the answer (don't just print it)
-    return str(response)
+    except Exception as e:
+        print(f"❌ Error during AI processing: {e}")
+        return "I encountered an internal error while processing your request."
 
 
 def fallback_to_general_knowledge(query):
     print(f"🧠 Switching to General Knowledge...")
-    response = llm.complete(query)
-    return str(response)
+    try:
+        response = llm.complete(query)
+        return str(response)
+    except Exception as e:
+        print(f"❌ Error interacting with Ollama: {e}")
+        return "I could not generate an answer. Is Ollama running?"
 
 
-# --- UPLOAD FUNCTION ---
+# --- MENU ACTIONS ---
 def upload_document_console():
     print("\n📂 --- FILE UPLOAD ---")
     file_path = input("Paste file path: ").strip().replace('"', '')
-    if file_path:
-        model_db.upload_file(file_path, COLLECTION_NAME)
-        global index
-        index = model_db.get_index(COLLECTION_NAME)
-    else:
+
+    if not file_path:
         print("Cancelled.")
+        return
+
+    # Call the robust upload function
+    model_db.upload_file(file_path, COLLECTION_NAME)
+
+    # Reload index safely
+    global index
+    try:
+        index = model_db.get_index(COLLECTION_NAME)
+    except Exception as e:
+        print(f"⚠️ Error reloading index: {e}")
+
+
+def manage_documents_console():
+    print("\n🗑️ --- MANAGE DOCUMENTS ---")
+    try:
+        files = model_db.list_uploaded_files(COLLECTION_NAME)
+    except Exception:
+        print("Could not retrieve file list.")
+        return
+
+    if not files:
+        print("Database is empty or could not be reached.")
+        return
+
+    print("Current files in database:")
+    for i, f in enumerate(files):
+        print(f" [{i + 1}] {f}")
+
+    print("\nType the number of the file to DELETE (or 'c' to cancel):")
+    choice = input("Choice: ").strip()
+
+    if choice.lower() == 'c':
+        return
+
+    # INPUT VALIDATION
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(files):
+            file_to_delete = files[idx]
+            confirm = input(f"Are you sure you want to delete '{file_to_delete}'? (y/n): ")
+            if confirm.lower() == 'y':
+                model_db.delete_file(file_to_delete, COLLECTION_NAME)
+
+                # Reload index safely
+                global index
+                index = model_db.get_index(COLLECTION_NAME)
+        else:
+            print("❌ Invalid number selected.")
+    except ValueError:
+        print("❌ Invalid input. Please enter a number.")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
 
 
 # --- MAIN CONTROLLER ---
 if __name__ == "__main__":
     while True:
-        print("\n=== BACKEND MENU ===")
-        print("1. Start Query Session")
-        print("2. Upload Document")
-        print("3. Exit")
+        try:
+            print("\n=== BACKEND MENU ===")
+            print("1. Start Query Session")
+            print("2. Upload Document")
+            print("3. Manage Documents (Delete)")
+            print("4. Exit")
 
-        choice = input("Select: ")
+            choice = input("Select: ").strip()
 
-        if choice == "1":
-            # 1. GET INPUT
-            user_text = receive_user_query()
+            if choice == "1":
+                user_text = receive_user_query()
+                if user_text:
+                    final_answer = run_crag(user_text)
+                    print(f"\n🤖 FINAL ANSWER:\n{final_answer}")
+            elif choice == "2":
+                upload_document_console()
+            elif choice == "3":
+                manage_documents_console()
+            elif choice == "4":
+                print("Goodbye!")
+                break
+            else:
+                print("Invalid choice, please try again.")
 
-            if user_text:
-                # 2. PROCESS INPUT
-                final_answer = run_crag(user_text)
-
-                # 3. DISPLAY OUTPUT (Simulating Frontend display)
-                print(f"\n🤖 FINAL ANSWER:\n{final_answer}")
-
-        elif choice == "2":
-            upload_document_console()
-        elif choice == "3":
+        except KeyboardInterrupt:
+            # Handles Ctrl+C gracefully
+            print("\n\nProgram Interrupted. Exiting...")
             break
+        except Exception as e:
+            print(f"❌ Fatal Loop Error: {e}")
