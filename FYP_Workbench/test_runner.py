@@ -11,7 +11,7 @@ def run_test():
 
     # 2. Ask a question
     user_question = "What is the price of the house?"
-    role = "admin"
+    role = "user"
 
     # 3. Get the answer
     result = bot.answer(user_question, role)
