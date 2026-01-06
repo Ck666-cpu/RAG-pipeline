@@ -1,6 +1,6 @@
 # FYP_Workbench/my_brain.py
 import ollama
-from data_type import CRAGResult
+from data_types import CRAGResult
 import time  # Just for effect
 
 

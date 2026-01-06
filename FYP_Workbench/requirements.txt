@@ -1,7 +1,6 @@
-llama-index
 llama-index-core
 llama-index-llms-ollama
-llama-index-embeddings-fastembed
+llama-index-embeddings-huggingface
 llama-index-vector-stores-qdrant
 qdrant-client
 sentence-transformers

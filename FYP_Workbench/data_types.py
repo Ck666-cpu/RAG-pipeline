@@ -1,4 +1,4 @@
-# FYP_Workbench/data_type.py
+# FYP_Workbench/data_types.py
 from dataclasses import dataclass
 
 # This mimics the class from backend/app/services/crag_service.py
