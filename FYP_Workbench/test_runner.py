@@ -1,39 +1,32 @@
 # FYP_Workbench/test_runner.py
-import time
 from fyp_service import FYPService
 
 
 def run_test():
-    print("--- STARTING ARCHITECTURE TEST ---")
-
-    # 1. Initialize the Service (Like the Backend would)
+    print("--- STARTING MEMORY TEST ---")
     service = FYPService()
 
-    # 2. (Optional) Upload a test file if you haven't yet
-    # path = input("Enter path to a PDF to test upload (or press Enter to skip): ").strip()
-    # if path:
-    #     success, msg = service.upload_document(path)
-    #     print(f"Upload Status: {msg}")
+    # Simulate a Chat History (List of strings)
+    # Let's pretend we already talked about the Tenancy Agreement
+    history = [
+        "User: I want to know about the Tenancy Agreement.",
+        "AI: I found a document regarding a residential house lease in Malaysia."
+    ]
 
-    # 3. Ask a Question
-    question = "What is this document about?"
+    # ASK A VAGUE QUESTION
+    # Without memory, the bot won't know what "the rent" refers to.
+    question = "How much is the rent?"
     role = "admin"
 
-    start = time.time()
-    result = service.answer(question, role)
-    duration = time.time() - start
+    print(f"\n❓ Question: {question}")
 
-    # 4. Validate Output
-    print("\n--- RESULT FROM SERVICE ---")
+    # Pass history into the function
+    result = service.answer(question, role, history=history)
+
+    print("\n--- RESULT ---")
     print(f"Answer:     {result.answer}")
     print(f"Sources:    {result.sources}")
-    print(f"Confidence: {result.confidence:.4f}")
-    print(f"Time Taken: {duration:.2f}s")
-
-    if hasattr(result, 'answer'):
-        print("\n✅ [SUCCESS] Service returns valid Data Object!")
-    else:
-        print("\n❌ [FAIL] Service returned wrong format.")
+    print(f"Confidence: {result.confidence:.2f}")
 
 
 if __name__ == "__main__":
