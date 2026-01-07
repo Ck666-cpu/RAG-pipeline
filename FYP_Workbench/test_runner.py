@@ -15,7 +15,7 @@ def run_test():
 
     # ASK A VAGUE QUESTION
     # Without memory, the bot won't know what "the rent" refers to.
-    question = "list out all the date that was mentioned in the Tenancy Agreement?"
+    question = "how to write a tenancy agreement?"
     role = "admin"
 
     print(f"\n❓ Question: {question}")
