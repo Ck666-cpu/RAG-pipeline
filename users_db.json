@@ -1,0 +1,7 @@
+{
+    "master": {
+        "username": "master",
+        "password": "123",
+        "role": "Master Admin"
+    }
+}

@@ -1,5 +1,5 @@
 # FYP_Workbench/view_model.py
-from typing import Optional
+from typing import Optional, Iterator
 from fyp_service import FYPService
 from user_manager import UserManager, User
 from data_types import CRAGResult, SourceNode, ChatMessage
@@ -49,33 +49,48 @@ class ChatViewModel:
         self._string_history.clear()
         self.status_message = "Logged Out"
 
-    # --- CHAT ---
-    def send_message(self, text: str):
+    # --- STREAMING CHAT ---
+    def send_message(self, text: str) -> Iterator[ChatMessage]:
+        """
+        Yields the SAME ChatMessage object repeatedly, but with updated content.
+        """
         if not self.current_user:
             self.status_message = "You must log in first."
-            return None
+            return
 
-        # 1. Add User Message
+        # 1. User Message
         user_msg = ChatMessage(role="user", content=text)
         self.chat_history.append(user_msg)
         self._string_history.append(f"User: {text}")
+        yield user_msg  # Yield user msg once so UI shows it
 
-        # 2. Get Response
-        result = self._service.answer(text, self.current_user, history=self._string_history)
-
-        ai_msg = ChatMessage(
-            role="ai",
-            content=result.answer,
-            debug_sources=result.source_nodes,
-            confidence=result.confidence
-        )
+        # 2. Prepare AI Message (Empty)
+        ai_msg = ChatMessage(role="ai", content="", confidence=0.0)
         self.chat_history.append(ai_msg)
-        self._string_history.append(f"AI: {result.answer}")
 
-        # 3. NEW: SAVE HISTORY TO DISK
+        # 3. Call Service (Streaming)
+        stream = self._service.answer(text, self.current_user, history=self._string_history)
+
+        full_response_text = ""
+
+        for chunk in stream:
+            # Case A: Metadata (First chunk)
+            if isinstance(chunk, CRAGResult):
+                ai_msg.debug_sources = chunk.source_nodes
+                ai_msg.confidence = chunk.confidence
+                # Yield immediately to show sources/loading state
+                yield ai_msg
+
+            # Case B: Text Token
+            elif isinstance(chunk, str):
+                full_response_text += chunk
+                ai_msg.content = full_response_text
+                # Yield update to show typing effect
+                yield ai_msg
+
+        # 4. Finalize
+        self._string_history.append(f"AI: {full_response_text}")
         history_manager.save_history(self.current_user.username, self.chat_history)
-
-        return ai_msg
 
     # --- USER MANAGEMENT (Master Admin/Admin Features) ---
     def register_user(self, new_user, new_pass, role):

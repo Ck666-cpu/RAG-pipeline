@@ -1,5 +1,6 @@
 # FYP_Workbench/fyp_service.py
 import time
+from typing import Generator, Union
 from llama_index.llms.ollama import Ollama
 from llama_index.core import Settings, get_response_synthesizer, PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -42,13 +43,12 @@ class FYPService:
         )
 
         # Prompt for General Chat (when no docs are found)
+        # Simplified Prompt for TinyLlama
         self.general_chat_prompt = PromptTemplate(
-            "History of conversation:\n{history_str}\n\n"
-            "User's Question: {query_str}\n\n"
-            "Instruction: The user is asking a question that is NOT in your document database. "
-            "Answer based on the conversation history above or your general knowledge. "
-            "If it is a statement, just acknowledge it politely.\n"
-            "Answer: "
+            "You are a helpful assistant. Chat with the user politely.\n\n"
+            "Conversation History:\n{history_str}\n\n"
+            "User: {query_str}\n"
+            "Assistant:"
         )
 
     def _get_prompt_for_role(self, role: str) -> PromptTemplate:
@@ -72,85 +72,91 @@ class FYPService:
                 "### Answer:\n"
             )
 
-    def answer(self, question: str, user, history: list = None) -> CRAGResult:
-        """Full RAG Pipeline with Fallback to General Chat"""
+    # CHANGED: Return type is now a Generator
+    def answer(self, question: str, user, history: list = None) -> Generator[Union[CRAGResult, str], None, None]:
 
-        # RULE 1: MASTER ADMIN CANNOT CHAT
+        # RULE 1: MASTER ADMIN CHECK
         if user.role == "Master Admin":
-            return CRAGResult(answer="Master Admins cannot chat.", source_nodes=[], confidence=0.0)
+            yield CRAGResult(answer="Master Admins cannot chat.", confidence=0.0)
+            return
 
         print(f" [FYPService] User ({user.username}) asked: '{question}'")
 
-        # 1. MEMORY CHECK (Rewrite Query)
+        # 1. REWRITE QUERY
         search_query = question
         if history and len(history) > 0:
-            print("   -> 🧠 Rewriting query using history...")
             search_query = self._contextualize(question, history)
-            print(f"   -> 🔄 Rewritten as: '{search_query}'")
 
-        # 2. LOAD INDEX & ATTEMPT RETRIEVAL
+        # 2. RETRIEVE
         nodes = []
         try:
             index = model_db.get_index(self.collection_name)
             if index:
-                # RULE 2: APPLY PERMISSION FILTERS
                 user_filters = model_db.get_user_filters(user.username)
-
-                # 3. RETRIEVE
-                retriever = VectorIndexRetriever(
-                    index=index,
-                    similarity_top_k=10,
-                    filters=user_filters
-                )
+                retriever = VectorIndexRetriever(index=index, similarity_top_k=10, filters=user_filters)
                 raw_nodes = retriever.retrieve(search_query)
 
-                # 4. RERANK
                 if raw_nodes and self.reranker:
                     nodes = self.reranker.postprocess_nodes(raw_nodes, query_str=search_query)
-                    # IMPORTANT: Filter out low relevance scores to avoid hallucinations
                     nodes = [n for n in nodes if n.score > 0.0]
         except Exception as e:
-            print(f"   -> ⚠️ Retrieval Error (skipping to chat): {e}")
-            nodes = []
+            print(f"   -> ⚠️ Retrieval Error: {e}")
 
-        # --- BRANCHING LOGIC ---
+        # --- STREAMING BRANCHES ---
 
-        # OPTION A: RELEVANT DOCS FOUND -> USE RAG
+        # OPTION A: RAG STREAMING
         if nodes:
-            print(f"   -> ✅ Found {len(nodes)} relevant docs. Using RAG.")
+            print(f"   -> ✅ Found {len(nodes)} docs. Streaming RAG...")
+
+            # 1. Prepare Metadata (Sources)
+            rich_sources = [
+                SourceNode(
+                    file_name=n.metadata.get('file_name', 'unknown'),
+                    content_snippet=n.node.get_content()[:200] + "...",
+                    score=float(n.score) if n.score else 0.0
+                ) for n in nodes
+            ]
+            confidence = 1 / (1 + 2.718 ** (-nodes[0].score))
+
+            # YIELD 1: Metadata Header
+            yield CRAGResult(answer="", source_nodes=rich_sources, confidence=confidence)
+
+            # 2. Start Streaming Text
             try:
-                role_prompt = self._get_prompt_for_role(user.role)
                 synthesizer = get_response_synthesizer(
                     response_mode="tree_summarize",
-                    text_qa_template=role_prompt
+                    text_qa_template=self._get_prompt_for_role(user.role),
+                    streaming=True  # <--- ENABLE STREAMING
                 )
                 response = synthesizer.synthesize(search_query, nodes=nodes)
 
-                # Format Sources
-                rich_sources = []
-                for n in nodes:
-                    rich_sources.append(SourceNode(
-                        file_name=n.metadata.get('file_name', 'unknown'),
-                        content_snippet=n.node.get_content()[:200] + "...",
-                        score=float(n.score) if n.score else 0.0
-                    ))
+                # YIELD 2+: Tokens
+                for token in response.response_gen:
+                    yield token
 
-                # Calculate confidence based on top score
-                top_score = nodes[0].score if nodes else 0.0
-                confidence = 1 / (1 + 2.718 ** (-top_score))
-
-                return CRAGResult(
-                    answer=str(response),
-                    source_nodes=rich_sources,
-                    confidence=float(confidence)
-                )
             except Exception as e:
-                return self._fallback(search_query, str(e))
+                yield f"[Error: {str(e)}]"
 
-        # OPTION B: NO DOCS FOUND -> USE MEMORY / GENERAL KNOWLEDGE
+        # OPTION B: MEMORY/CHAT STREAMING
         else:
-            print("   -> 0 docs found. Switching to Chat/Memory Mode...")
-            return self._answer_from_memory(question, history)
+            print("   -> 0 docs found. Streaming Chat Mode...")
+
+            # YIELD 1: Metadata (Empty sources)
+            yield CRAGResult(answer="", source_nodes=[], confidence=0.5)
+
+            # 2. Stream from LLM directly
+            try:
+                history_str = "\n".join(history[-6:]) if history else "No history."
+                prompt = self.general_chat_prompt.format(history_str=history_str, query_str=question)
+
+                # Use stream_complete for raw text generation
+                stream_gen = self.llm.stream_complete(prompt)
+
+                for response_chunk in stream_gen:
+                    yield response_chunk.delta
+
+            except Exception as e:
+                yield f"[Error: {str(e)}]"
 
     def _answer_from_memory(self, question, history):
         """Generates an answer using ONLY the chat history (No RAG)."""
