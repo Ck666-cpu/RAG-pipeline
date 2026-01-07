@@ -4,14 +4,9 @@
         "password": "123",
         "role": "Master Admin"
     },
-    "john_staff": {
-        "username": "john_staff",
-        "password": "pass",
+    "test_memory_user": {
+        "username": "test_memory_user",
+        "password": "password123",
         "role": "Staff"
-    },
-    "jane_admin": {
-        "username": "jane_admin",
-        "password": "pass",
-        "role": "Admin"
     }
 }

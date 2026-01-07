@@ -2,15 +2,9 @@
 from typing import Optional
 from fyp_service import FYPService
 from user_manager import UserManager, User
-from data_types import CRAGResult, SourceNode
+from data_types import CRAGResult, SourceNode, ChatMessage
 from dataclasses import dataclass, field
-
-@dataclass
-class ChatMessage:
-    role: str
-    content: str
-    debug_sources: list = None
-    confidence: float = 0.0
+import history_manager
 
 
 class ChatViewModel:
@@ -30,26 +24,44 @@ class ChatViewModel:
         if user:
             self.current_user = user
             self.status_message = f"Welcome, {user.role} {user.username}"
-            self.chat_history.clear()  # Clear view on relogin
+
+            # CHANGED: LOAD HISTORY INSTEAD OF CLEARING
+            self.chat_history = history_manager.load_history(user.username)
+
+            # Also rebuild the string history for the LLM context
+            self._string_history = [
+                f"{msg.role.capitalize()}: {msg.content}"
+                for msg in self.chat_history
+            ]
+
             return True
         else:
             self.status_message = "Invalid Credentials"
             return False
 
     def logout(self):
+        # Optional: Save one last time before logout
+        if self.current_user:
+            history_manager.save_history(self.current_user.username, self.chat_history)
+
         self.current_user = None
         self.chat_history.clear()
+        self._string_history.clear()
         self.status_message = "Logged Out"
 
-    # --- CHAT (Permission Checked) ---
+    # --- CHAT ---
     def send_message(self, text: str):
         if not self.current_user:
             self.status_message = "You must log in first."
             return None
 
-        # Delegate to Service (which handles logic)
-        # We pass the WHOLE user object now
-        result = self._service.answer(text, self.current_user)
+        # 1. Add User Message
+        user_msg = ChatMessage(role="user", content=text)
+        self.chat_history.append(user_msg)
+        self._string_history.append(f"User: {text}")
+
+        # 2. Get Response
+        result = self._service.answer(text, self.current_user, history=self._string_history)
 
         ai_msg = ChatMessage(
             role="ai",
@@ -58,6 +70,11 @@ class ChatViewModel:
             confidence=result.confidence
         )
         self.chat_history.append(ai_msg)
+        self._string_history.append(f"AI: {result.answer}")
+
+        # 3. NEW: SAVE HISTORY TO DISK
+        history_manager.save_history(self.current_user.username, self.chat_history)
+
         return ai_msg
 
     # --- USER MANAGEMENT (Master Admin/Admin Features) ---

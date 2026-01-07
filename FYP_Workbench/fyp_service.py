@@ -4,6 +4,7 @@ from llama_index.llms.ollama import Ollama
 from llama_index.core import Settings, get_response_synthesizer, PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank
+
 import model_db
 from data_types import CRAGResult, SourceNode
 
@@ -30,110 +31,181 @@ class FYPService:
             print(f"❌ Error initializing Reranker: {e}")
             self.reranker = None
 
-        # (Prompt definitions moved to _get_prompt_for_role)
+        # 3. PROMPTS
+        # Prompt to rewrite "it" or "he" into specific names based on history
+        self.rewrite_prompt = PromptTemplate(
+            "History of conversation:\n{history_str}\n\n"
+            "User's new question: {query_str}\n\n"
+            "Task: Rewrite the user's new question to be a standalone query based on the history. "
+            "If the user is just stating a fact, repeat the fact.\n"
+            "New Question: "
+        )
+
+        # Prompt for General Chat (when no docs are found)
+        self.general_chat_prompt = PromptTemplate(
+            "History of conversation:\n{history_str}\n\n"
+            "User's Question: {query_str}\n\n"
+            "Instruction: The user is asking a question that is NOT in your document database. "
+            "Answer based on the conversation history above or your general knowledge. "
+            "If it is a statement, just acknowledge it politely.\n"
+            "Answer: "
+        )
 
     def _get_prompt_for_role(self, role: str) -> PromptTemplate:
         """Returns a different system prompt based on the user's role."""
-
-        # OPTION A: ADMIN PROMPT (Technical, Detailed, Debug-oriented)
         if role.lower() == "admin":
             return PromptTemplate(
                 "### Instruction:\n"
                 "You are an internal Technical Advisor. The user is an Administrator.\n"
-                "1. Answer the question in detail.\n"
-                "2. If unsure, explicitly state 'Insufficient Data'.\n"
-                "3. Use professional, technical language.\n"
-                "\n"
+                "Answer based ONLY on the context below.\n"
                 "### Context:\n{context_str}\n\n"
                 "### Question:\n{query_str}\n\n"
-                "### Admin Briefing:\n"
+                "### Answer:\n"
             )
-
-        # OPTION B: TENANT/USER PROMPT (Friendly, Concise, Simple English)
         else:
             return PromptTemplate(
                 "### Instruction:\n"
-                "You are a helpful Customer Service Assistant for a housing agency.\n"
-                "1. Answer the question politely and concisely.\n"
-                "2. Avoid technical jargon.\n"
-                "3. If the answer is not in the context, apologize and say you don't know.\n"
-                "\n"
+                "You are a helpful Customer Service Assistant.\n"
+                "Answer based ONLY on the context below.\n"
                 "### Context:\n{context_str}\n\n"
                 "### Question:\n{query_str}\n\n"
                 "### Answer:\n"
             )
 
     def answer(self, question: str, user, history: list = None) -> CRAGResult:
-        """
-        'user' is now the full User object from user_manager, not just a role string.
-        """
+        """Full RAG Pipeline with Fallback to General Chat"""
+
         # RULE 1: MASTER ADMIN CANNOT CHAT
         if user.role == "Master Admin":
-            return CRAGResult(
-                answer="Master Admins do not have access to Chat features.",
-                source_nodes=[],
-                confidence=0.0
-            )
+            return CRAGResult(answer="Master Admins cannot chat.", source_nodes=[], confidence=0.0)
 
         print(f" [FYPService] User ({user.username}) asked: '{question}'")
 
-        # ... (Memory/Contextualize logic same as before) ...
-        search_query = question  # (simplified for brevity)
+        # 1. MEMORY CHECK (Rewrite Query)
+        search_query = question
+        if history and len(history) > 0:
+            print("   -> 🧠 Rewriting query using history...")
+            search_query = self._contextualize(question, history)
+            print(f"   -> 🔄 Rewritten as: '{search_query}'")
 
-        index = model_db.get_index(self.collection_name)
-        if not index: return self._fallback(search_query, "DB Error")
-
+        # 2. LOAD INDEX & ATTEMPT RETRIEVAL
+        nodes = []
         try:
-            # RULE 2: APPLY PERMISSION FILTERS
-            # Staff/Admin only see Global docs OR their own Private docs
-            user_filters = model_db.get_user_filters(user.username)
+            index = model_db.get_index(self.collection_name)
+            if index:
+                # RULE 2: APPLY PERMISSION FILTERS
+                user_filters = model_db.get_user_filters(user.username)
 
-            retriever = VectorIndexRetriever(
-                index=index,
-                similarity_top_k=10,
-                filters=user_filters  # <--- INJECTED FILTERS
-            )
+                # 3. RETRIEVE
+                retriever = VectorIndexRetriever(
+                    index=index,
+                    similarity_top_k=10,
+                    filters=user_filters
+                )
+                raw_nodes = retriever.retrieve(search_query)
 
-            nodes = retriever.retrieve(search_query)
-
-            # ... (Reranking & Synthesis same as before) ...
-            # ... (Make sure to pass user.role to _get_prompt_for_role) ...
-
-            # (Returning Mock Result for brevity of the snippet - keep your existing full logic)
-            return CRAGResult(answer="Processed with filters.", source_nodes=[], confidence=1.0)
-
+                # 4. RERANK
+                if raw_nodes and self.reranker:
+                    nodes = self.reranker.postprocess_nodes(raw_nodes, query_str=search_query)
+                    # IMPORTANT: Filter out low relevance scores to avoid hallucinations
+                    nodes = [n for n in nodes if n.score > 0.0]
         except Exception as e:
-            return self._fallback(search_query, str(e))
+            print(f"   -> ⚠️ Retrieval Error (skipping to chat): {e}")
+            nodes = []
+
+        # --- BRANCHING LOGIC ---
+
+        # OPTION A: RELEVANT DOCS FOUND -> USE RAG
+        if nodes:
+            print(f"   -> ✅ Found {len(nodes)} relevant docs. Using RAG.")
+            try:
+                role_prompt = self._get_prompt_for_role(user.role)
+                synthesizer = get_response_synthesizer(
+                    response_mode="tree_summarize",
+                    text_qa_template=role_prompt
+                )
+                response = synthesizer.synthesize(search_query, nodes=nodes)
+
+                # Format Sources
+                rich_sources = []
+                for n in nodes:
+                    rich_sources.append(SourceNode(
+                        file_name=n.metadata.get('file_name', 'unknown'),
+                        content_snippet=n.node.get_content()[:200] + "...",
+                        score=float(n.score) if n.score else 0.0
+                    ))
+
+                # Calculate confidence based on top score
+                top_score = nodes[0].score if nodes else 0.0
+                confidence = 1 / (1 + 2.718 ** (-top_score))
+
+                return CRAGResult(
+                    answer=str(response),
+                    source_nodes=rich_sources,
+                    confidence=float(confidence)
+                )
+            except Exception as e:
+                return self._fallback(search_query, str(e))
+
+        # OPTION B: NO DOCS FOUND -> USE MEMORY / GENERAL KNOWLEDGE
+        else:
+            print("   -> 0 docs found. Switching to Chat/Memory Mode...")
+            return self._answer_from_memory(question, history)
+
+    def _answer_from_memory(self, question, history):
+        """Generates an answer using ONLY the chat history (No RAG)."""
+        try:
+            # Flatten history for the prompt (last 6 turns)
+            history_str = "\n".join(history[-6:]) if history else "No history."
+
+            # Ask LLM directly
+            prompt = self.general_chat_prompt.format(
+                history_str=history_str,
+                query_str=question
+            )
+            response = self.llm.complete(prompt)
+
+            return CRAGResult(
+                answer=str(response),
+                source_nodes=[],  # No sources for memory chat
+                confidence=0.5  # Moderate confidence for general chat
+            )
+        except Exception as e:
+            return self._fallback(question, str(e))
+
+    def _contextualize(self, query, history):
+        """Uses LLM to rewrite 'It' or 'He' into specific names."""
+        try:
+            history_str = "\n".join(history[-2:])  # Last 2 messages
+            response = self.llm.complete(
+                self.rewrite_prompt.format(history_str=history_str, query_str=query)
+            )
+            clean_text = str(response).strip().strip('"').strip("'")
+            # Sanity check: if rewrite is too long, it's likely a hallucination
+            if len(clean_text) > len(query) + 50:
+                return query
+            return clean_text
+        except Exception:
+            return query
+
+    def _fallback(self, query, reason):
+        print(f"   -> Fallback triggered: {reason}")
+        return CRAGResult(
+            answer="I could not find any specific information about that.",
+            source_nodes=[],
+            confidence=0.0
+        )
 
     def upload_document(self, file_path, user, is_global=False):
-        # RULE 3: UPLOAD PERMISSIONS
-        # Staff -> Can upload Private only.
-        # Admin -> Can upload Private OR Global.
-        # Master Admin -> Cannot upload.
-
         if user.role == "Master Admin":
-            return False, "Master Admins cannot upload documents."
-
+            return False, "Master Admins cannot upload."
         if is_global and user.role != "Admin":
-            return False, "Only Admins can upload Global documents."
+            return False, "Only Admins can upload Global docs."
 
         visibility = "global" if is_global else "private"
-
         return model_db.upload_file(
             file_path,
             self.collection_name,
             owner_username=user.username,
             visibility=visibility
-        )
-
-    # ... (Copy _contextualize, _fallback, upload_document from previous code) ...
-    def _contextualize(self, query, history):
-        # (Same as before)
-        return query  # simplified for brevity
-
-    def _fallback(self, query, reason):
-        return CRAGResult(
-            answer="I could not find that information.",
-            sources=[],
-            confidence=0.0
         )

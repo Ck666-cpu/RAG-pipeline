@@ -10,6 +10,12 @@ class SourceNode:
     content_snippet: str  # The actual text paragraph
     score: float  # The relevance score (0.0 to 1.0)
 
+@dataclass
+class ChatMessage:
+    role: str
+    content: str
+    debug_sources: list = None
+    confidence: float = 0.0
 
 @dataclass
 class CRAGResult:
