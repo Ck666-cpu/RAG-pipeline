@@ -15,7 +15,7 @@ def run_test():
 
     # ASK A VAGUE QUESTION
     # Without memory, the bot won't know what "the rent" refers to.
-    question = "What is the date of the tenancy agreement?"
+    question = "list out all the date that was mentioned in the Tenancy Agreement?"
     role = "admin"
 
     print(f"\n❓ Question: {question}")
@@ -27,16 +27,6 @@ def run_test():
     print(f"Answer:     {result.answer}")
     print(f"Sources:    {result.sources}")
     print(f"Confidence: {result.confidence:.2f}")
-
-    # In your code where you get the response
-    response = query_engine.query("How much is the rent?")
-
-    # ADD THIS DEBUG PRINT:
-    print("\n--- DEBUG: WHAT THE LLM SAW ---")
-    for node in response.source_nodes:
-        print(f"Content: {node.get_content()}")
-        print(f"Score: {node.score}")
-    print("-------------------------------\n")
 
 if __name__ == "__main__":
     run_test()

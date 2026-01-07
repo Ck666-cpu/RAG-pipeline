@@ -32,16 +32,17 @@ class FYPService:
             self.reranker = None
 
         # 3. PROMPTS
-        # A. Answer Prompt
+        # A. Answer Prompt (Simplified for TinyLlama)
         self.qa_prompt = PromptTemplate(
-            "Context information is below.\n"
-            "---------------------\n"
-            "{context_str}\n"
-            "---------------------\n"
-            "Given the context information and not prior knowledge, "
-            "answer the query in a clear, step-by-step format.\n"
-            "Query: {query_str}\n"
-            "Answer: "
+            "### Instruction:\n"
+            "You are a helpful assistant. Use the context below to answer the question concisely.\n"
+            "If the answer is not in the context, say 'I cannot find that information'.\n"
+            "Do not repeat these instructions.\n\n"
+            "### Context:\n"
+            "{context_str}\n\n"
+            "### Question:\n"
+            "{query_str}\n\n"
+            "### Answer:\n"
         )
 
         # B. Memory/Rewrite Prompt (Simplified for TinyLlama)
@@ -72,6 +73,8 @@ class FYPService:
         if not index:
             return self._fallback(search_query, "Database connection failed.")
 
+            # Inside fyp_service.py -> answer() function
+
         try:
             # 3. RETRIEVE
             retriever = VectorIndexRetriever(index=index, similarity_top_k=10)
@@ -80,9 +83,34 @@ class FYPService:
             if not nodes:
                 return self._fallback(search_query, "No relevant docs found.")
 
+            # --- DEBUG PRINT START: WHAT DID QDRANT FIND? ---
+            print(f"\n[DEBUG] 1. Initial Retrieval found {len(nodes)} nodes.")
+            for i, n in enumerate(nodes[:2]):  # Print first 2 only
+                print(f"  - Node {i} Score: {n.score:.4f}")
+                print(f"  - Content: {n.node.get_content()[:100]}...")  # First 100 chars
+            # ------------------------------------------------
+
             # 4. RERANK
             if self.reranker:
                 nodes = self.reranker.postprocess_nodes(nodes, query_str=search_query)
+
+                # --- NEW CODE: FILTER OUT BAD MATCHES ---
+                # Cross-Encoders usually output negative logits for "non-matches".
+                # We filter anything below 0.0 (or -1.0 if you want to be lenient).
+                nodes = [n for n in nodes if n.score > 0.0]
+
+                if not nodes:
+                    print("   -> ❌ Reranker filtered out all documents as irrelevant.")
+                    return self._fallback(search_query, "Low relevance scores.")
+                # ----------------------------------------
+
+            # --- DEBUG PRINT START: WHAT SURVIVED RERANKING? ---
+            print(f"\n[DEBUG] 2. After Reranking (Top {len(nodes)}):")
+            for i, n in enumerate(nodes):
+                print(f"  - Node {i} Score: {n.score:.4f}")
+                print(f"  - Content: {n.node.get_content()[:100]}...")
+            print("--------------------------------------------------\n")
+            # ---------------------------------------------------
 
             # 5. GENERATE ANSWER
             synthesizer = get_response_synthesizer(
@@ -90,6 +118,8 @@ class FYPService:
                 text_qa_template=self.qa_prompt
             )
             response = synthesizer.synthesize(search_query, nodes=nodes)
+
+            # ... rest of your code ...
 
             # 6. FORMAT RESULT
             sources = list(set([n.metadata.get('file_name', 'unknown') for n in nodes]))
@@ -135,8 +165,13 @@ class FYPService:
 
     def _fallback(self, query, reason):
         print(f"   -> Fallback triggered: {reason}")
-        resp = self.llm.complete(query)
-        return CRAGResult(answer=str(resp), sources=["General Knowledge"], confidence=0.1)
+
+        # NEW CODE: Return a static, honest message.
+        return CRAGResult(
+            answer="I could not find any specific information about that in the provided documents.",
+            sources=["None (Low Relevance)"],
+            confidence=0.0
+        )
 
     # Added to help you upload files easily from test runner
     def upload_document(self, file_path):
