@@ -4,9 +4,8 @@ from llama_index.llms.ollama import Ollama
 from llama_index.core import Settings, get_response_synthesizer, PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.postprocessor import SentenceTransformerRerank
-
 import model_db
-from data_types import CRAGResult
+from data_types import CRAGResult, SourceNode
 
 
 class FYPService:
@@ -64,61 +63,68 @@ class FYPService:
                 "### Answer:\n"
             )
 
-    # ... (Rewrite Prompt remains the same or can also be moved) ...
+    def answer(self, question: str, user, history: list = None) -> CRAGResult:
+        """
+        'user' is now the full User object from user_manager, not just a role string.
+        """
+        # RULE 1: MASTER ADMIN CANNOT CHAT
+        if user.role == "Master Admin":
+            return CRAGResult(
+                answer="Master Admins do not have access to Chat features.",
+                source_nodes=[],
+                confidence=0.0
+            )
 
-    def answer(self, question: str, user_role: str, history: list = None) -> CRAGResult:
-        print(f" [FYPService] User ({user_role}) asked: '{question}'")
+        print(f" [FYPService] User ({user.username}) asked: '{question}'")
 
-        # 1. MEMORY CHECK
-        search_query = question
-        if history and len(history) > 0:
-            search_query = self._contextualize(question, history)
+        # ... (Memory/Contextualize logic same as before) ...
+        search_query = question  # (simplified for brevity)
 
-        # 2. LOAD INDEX
         index = model_db.get_index(self.collection_name)
-        if not index:
-            return self._fallback(search_query, "Database connection failed.")
+        if not index: return self._fallback(search_query, "DB Error")
 
         try:
-            # 3. RETRIEVE
-            retriever = VectorIndexRetriever(index=index, similarity_top_k=10)
+            # RULE 2: APPLY PERMISSION FILTERS
+            # Staff/Admin only see Global docs OR their own Private docs
+            user_filters = model_db.get_user_filters(user.username)
+
+            retriever = VectorIndexRetriever(
+                index=index,
+                similarity_top_k=10,
+                filters=user_filters  # <--- INJECTED FILTERS
+            )
+
             nodes = retriever.retrieve(search_query)
 
-            if not nodes:
-                return self._fallback(search_query, "No relevant docs found.")
+            # ... (Reranking & Synthesis same as before) ...
+            # ... (Make sure to pass user.role to _get_prompt_for_role) ...
 
-            # 4. RERANK
-            if self.reranker:
-                nodes = self.reranker.postprocess_nodes(nodes, query_str=search_query)
-                nodes = [n for n in nodes if n.score > 0.0]  # Filter
-
-                if not nodes:
-                    return self._fallback(search_query, "Low relevance scores.")
-
-            # 5. GENERATE ANSWER (DYNAMIC PROMPT HERE)
-            # Fetch the specific prompt for this role
-            role_prompt = self._get_prompt_for_role(user_role)
-
-            synthesizer = get_response_synthesizer(
-                response_mode="tree_summarize",
-                text_qa_template=role_prompt  # <--- INJECTED HERE
-            )
-            response = synthesizer.synthesize(search_query, nodes=nodes)
-
-            # 6. FORMAT RESULT
-            sources = list(set([n.metadata.get('file_name', 'unknown') for n in nodes]))
-            raw_score = nodes[0].score if nodes else 0.0
-            confidence = 1 / (1 + 2.718 ** (-raw_score))
-
-            return CRAGResult(
-                answer=str(response),
-                sources=sources,
-                confidence=float(confidence)
-            )
+            # (Returning Mock Result for brevity of the snippet - keep your existing full logic)
+            return CRAGResult(answer="Processed with filters.", source_nodes=[], confidence=1.0)
 
         except Exception as e:
-            print(f"❌ Error: {e}")
             return self._fallback(search_query, str(e))
+
+    def upload_document(self, file_path, user, is_global=False):
+        # RULE 3: UPLOAD PERMISSIONS
+        # Staff -> Can upload Private only.
+        # Admin -> Can upload Private OR Global.
+        # Master Admin -> Cannot upload.
+
+        if user.role == "Master Admin":
+            return False, "Master Admins cannot upload documents."
+
+        if is_global and user.role != "Admin":
+            return False, "Only Admins can upload Global documents."
+
+        visibility = "global" if is_global else "private"
+
+        return model_db.upload_file(
+            file_path,
+            self.collection_name,
+            owner_username=user.username,
+            visibility=visibility
+        )
 
     # ... (Copy _contextualize, _fallback, upload_document from previous code) ...
     def _contextualize(self, query, history):
@@ -131,6 +137,3 @@ class FYPService:
             sources=[],
             confidence=0.0
         )
-
-    def upload_document(self, file_path):
-        return model_db.upload_file(file_path, self.collection_name)

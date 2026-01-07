@@ -1,0 +1,17 @@
+{
+    "master": {
+        "username": "master",
+        "password": "123",
+        "role": "Master Admin"
+    },
+    "john_staff": {
+        "username": "john_staff",
+        "password": "pass",
+        "role": "Staff"
+    },
+    "jane_admin": {
+        "username": "jane_admin",
+        "password": "pass",
+        "role": "Admin"
+    }
+}

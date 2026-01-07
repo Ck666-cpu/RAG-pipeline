@@ -1,90 +1,99 @@
 # FYP_Workbench/view_model.py
-from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 from fyp_service import FYPService
-from data_types import CRAGResult
-
+from user_manager import UserManager, User
+from data_types import CRAGResult, SourceNode
+from dataclasses import dataclass, field
 
 @dataclass
 class ChatMessage:
     role: str
     content: str
-    sources: List[str] = field(default_factory=list)
+    debug_sources: list = None
     confidence: float = 0.0
 
 
 class ChatViewModel:
     def __init__(self):
         self._service = FYPService()
+        self._user_manager = UserManager()
 
-        # STATE
-        self.chat_history: List[ChatMessage] = []
-        self.is_processing: bool = False
-        self.status_message: str = "Ready"
+        # SESSION STATE
+        self.current_user: Optional[User] = None
 
-        # NEW: Role Management
-        self.current_role: str = "User"  # Default role
+        self.chat_history: list[ChatMessage] = []
+        self.status_message: str = "Please Log In"
 
-        self._string_history: List[str] = []
+    # --- AUTHENTICATION ---
+    def login(self, username, password) -> bool:
+        user = self._user_manager.login(username, password)
+        if user:
+            self.current_user = user
+            self.status_message = f"Welcome, {user.role} {user.username}"
+            self.chat_history.clear()  # Clear view on relogin
+            return True
+        else:
+            self.status_message = "Invalid Credentials"
+            return False
 
-    def set_user_role(self, role: str):
-        """Called by UI to switch roles (e.g., 'Admin' or 'Tenant')"""
-        self.current_role = role
-        self.status_message = f"Role switched to {role}"
-        # Optional: Clear history on role switch to avoid context confusion
-        # self.clear_history()
+    def logout(self):
+        self.current_user = None
+        self.chat_history.clear()
+        self.status_message = "Logged Out"
 
-    def send_message(self, user_input: str) -> Optional[ChatMessage]:
-        if not user_input.strip():
+    # --- CHAT (Permission Checked) ---
+    def send_message(self, text: str):
+        if not self.current_user:
+            self.status_message = "You must log in first."
             return None
 
-        self.is_processing = True
-        self.status_message = f"Thinking ({self.current_role})..."
+        # Delegate to Service (which handles logic)
+        # We pass the WHOLE user object now
+        result = self._service.answer(text, self.current_user)
 
-        user_msg = ChatMessage(role="user", content=user_input)
-        self.chat_history.append(user_msg)
-        self._string_history.append(f"User: {user_input}")
+        ai_msg = ChatMessage(
+            role="ai",
+            content=result.answer,
+            debug_sources=result.source_nodes,
+            confidence=result.confidence
+        )
+        self.chat_history.append(ai_msg)
+        return ai_msg
 
+    # --- USER MANAGEMENT (Master Admin/Admin Features) ---
+    def register_user(self, new_user, new_pass, role):
+        if not self.current_user: return "Not Logged In"
         try:
-            # CALL SERVICE WITH CURRENT ROLE
-            result: CRAGResult = self._service.answer(
-                question=user_input,
-                user_role=self.current_role,  # <--- PASSING THE STATE
-                history=self._string_history
+            return self._user_manager.register_user(
+                self.current_user.role, new_user, new_pass, role
             )
-
-            ai_msg = ChatMessage(
-                role="ai",
-                content=result.answer,
-                sources=result.sources,
-                confidence=result.confidence
-            )
-
-            self.chat_history.append(ai_msg)
-            self._string_history.append(f"AI: {result.answer}")
-            self.status_message = "Ready"
-
-            self.is_processing = False
-            return ai_msg
-
         except Exception as e:
-            self.status_message = f"Error: {str(e)}"
-            self.is_processing = False
-            return ChatMessage(role="ai", content="An internal error occurred.")
+            return str(e)
 
-    def upload_document(self, file_path: str) -> str:
-        self.is_processing = True
-        self.status_message = "Uploading..."
+    def update_role(self, target_user, new_role):
+        if not self.current_user: return "Not Logged In"
         try:
-            success, message = self._service.upload_document(file_path)
-            self.status_message = message
+            return self._user_manager.update_role(
+                self.current_user.role, target_user, new_role
+            )
         except Exception as e:
-            self.status_message = f"Upload Error: {str(e)}"
+            return str(e)
 
-        self.is_processing = False
-        return self.status_message
+    def delete_user(self, target_user):
+        if not self.current_user: return "Not Logged In"
+        try:
+            return self._user_manager.delete_user(
+                self.current_user.role, target_user
+            )
+        except Exception as e:
+            return str(e)
 
-    def clear_history(self):
-        self.chat_history.clear()
-        self._string_history.clear()
-        self.status_message = "Memory cleared."
+    # --- DOCUMENT UPLOAD ---
+    def upload_document(self, file_path, is_global=False):
+        if not self.current_user: return "Not Logged In"
+
+        success, msg = self._service.upload_document(
+            file_path, self.current_user, is_global
+        )
+        self.status_message = msg
+        return msg
