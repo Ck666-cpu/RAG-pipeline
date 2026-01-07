@@ -52,3 +52,33 @@ def upload_file(file_path, collection_name):
         return True, "Upload Successful"
     except Exception as e:
         return False, str(e)
+
+
+# Add this to FYP_Workbench/model_db.py if needed
+def list_uploaded_files(collection_name):
+    client = get_client()
+    if not client: return []
+    # Note: Qdrant doesn't store filenames natively unless in metadata.
+    # This requires scrolling through points to find unique filenames.
+    # For a simple prototype, we might skip this or implement a scroll.
+    return []
+
+
+def delete_file(file_name, collection_name):
+    client = get_client()
+    if not client: return
+
+    # Qdrant delete by filter
+    client.delete(
+        collection_name=collection_name,
+        points_selector=qdrant_client.models.FilterSelector(
+            filter=qdrant_client.models.Filter(
+                must=[
+                    qdrant_client.models.FieldCondition(
+                        key="file_name",
+                        match=qdrant_client.models.MatchValue(value=file_name)
+                    )
+                ]
+            )
+        )
+    )
