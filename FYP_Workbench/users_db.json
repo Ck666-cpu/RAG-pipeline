@@ -3,15 +3,5 @@
         "username": "master",
         "password": "123",
         "role": "Master Admin"
-    },
-    "test_memory_user": {
-        "username": "test_memory_user",
-        "password": "password123",
-        "role": "Staff"
-    },
-    "test_streamer": {
-        "username": "test_streamer",
-        "password": "pass",
-        "role": "Admin"
     }
 }

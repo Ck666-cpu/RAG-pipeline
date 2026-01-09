@@ -3,7 +3,10 @@ import json
 import os
 from dataclasses import dataclass, asdict
 
-USER_DB_FILE = "users_db.json"
+# --- FIX: USE ABSOLUTE PATH ---
+# This ensures the DB is always in FYP_Workbench/, no matter where you run the terminal command.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USER_DB_FILE = os.path.join(BASE_DIR, "users_db.json")
 
 
 @dataclass
@@ -31,8 +34,12 @@ class UserManager:
             json.dump(data, f, indent=4)
 
     def login(self, username, password):
-        user_data = self.users.get(username)
-        if user_data and user_data['password'] == password:
+        # FIX: Strip spaces so "master " works as "master"
+        clean_user = username.strip()
+        clean_pass = password.strip()
+
+        user_data = self.users.get(clean_user)
+        if user_data and user_data['password'] == clean_pass:
             return User(**user_data)
         return None
 
